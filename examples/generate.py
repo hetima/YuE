@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Generate from original example lyrics, optionally with a supplied ABC score."""
+"""Generate from original example lyrics, optionally with a supplied ABC score.
+
+Request JSON handling on top of the upstream SongRequest fields:
+- seed: -1 draws a random seed from SongRequest's [0, 2**63) domain; the drawn
+  value is echoed in the summary JSON and recorded in request.json so the run
+  can be reproduced exactly.
+- style_key: when its value is a nonblank string naming another key in the
+  same JSON, that key's value replaces style (style presets in one file);
+  a missing key, blank value, or absent style_key keeps style as-is.
+Unknown JSON fields are ignored rather than rejected.
+"""
 
 import argparse
 import json
@@ -23,6 +33,10 @@ def main():
     if args.output.exists():
         parser.error("Choose a fresh output directory to retain each version.")
     request = json.loads(args.request.read_text(encoding="utf-8"))
+    style_key = request.get("style_key")
+    if isinstance(style_key, str) and style_key.strip() and style_key in request:
+        # A nonblank style_key selects a style preset from the same request.
+        request["style"] = request[style_key]
     # Only SongRequest fields are forwarded; unknown JSON fields are ignored.
     fields = {key: request[key] for key in
               ("style", "lyrics", "cot", "seed", "abc", "cfg_scale", "id") if key in request}
