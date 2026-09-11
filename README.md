@@ -8,8 +8,6 @@ uv pip install path/to/flash_attn-2.8.3+cu130torch2.12-cp312-cp312-win_amd64.whl
 uv pip install -e .
 ```
 
-カバー用のスクリプトを `examples/cover.py` に置いています。
-
 ---
 
 > Looking for the original YuE? Its code, documentation, and license are preserved on the **[YuE-v1 branch](https://github.com/multimodal-art-projection/YuE/tree/YuE-v1)**.
