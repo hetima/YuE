@@ -1,8 +1,10 @@
 """Memory-bounded acoustic flow matching with one AR prefill per original chunk.
 
-Only PyTorch is required. The reference 32-step midpoint solver, full-song CPU
-FP32 noise draw, boundary positions, and original context chunks are preserved.
-Attention query tiling changes temporary storage, never the visible key set.
+Only PyTorch is required; an optional flash-attn wheel serves the attention
+when torch's own fused kernels are absent. The reference 32-step midpoint
+solver, full-song CPU FP32 noise draw, boundary positions, and original context
+chunks are preserved. Attention query tiling changes temporary storage, never
+the visible key set.
 """
 from __future__ import annotations
 
@@ -48,11 +50,37 @@ def song_chunks(prefix, codec, seed, context=CONTEXT):
             for a, b in ranges]
 
 
+_FLASH_ATTN_FUNC = None
+_FLASH_ATTN_CHECKED = False
+
+
+def _flash_attn_wheel(device, dtype):
+    """Resolve the optional flash-attn wheel once with a live one-token call.
+
+    A wheel built against different torch/CUDA/arch may import yet fail at
+    kernel launch, so import success alone proves nothing.
+    """
+    global _FLASH_ATTN_FUNC, _FLASH_ATTN_CHECKED
+    if not _FLASH_ATTN_CHECKED:
+        _FLASH_ATTN_CHECKED = True
+        try:
+            from flash_attn import flash_attn_func
+            probe = torch.zeros(1, 1, 1, 64, device=device, dtype=dtype)
+            flash_attn_func(probe, probe, probe, causal=True)
+            _FLASH_ATTN_FUNC = flash_attn_func
+        except Exception:
+            _FLASH_ATTN_FUNC = None
+    return _FLASH_ATTN_FUNC
+
+
 def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
     """Attend [tokens, heads, dim] tensors without materializing a song mask.
 
     CPU/MPS bound the number of query rows for a potential math SDPA fallback.
-    CUDA normally uses PyTorch's fused SDPA without an external flash package.
+    CUDA normally uses PyTorch's fused SDPA without an external flash package;
+    on builds whose fused kernels are absent the optional flash-attn wheel
+    serves song-length chunks without the [heads, L, L] score buffer a math
+    fallback would materialize.
     """
     if backend not in {"sdpa", "math", "flash"}:
         raise ValueError("attention must be sdpa, math, or flash")
@@ -67,6 +95,12 @@ def attention(q, k, v, *, causal=False, backend="sdpa", query_chunk_size=None):
     if query_chunk_size is not None and (isinstance(query_chunk_size, bool) or
                                         not isinstance(query_chunk_size, Integral) or query_chunk_size < 1):
         raise ValueError("query_chunk_size must be a positive integer")
+    if (backend == "sdpa" and query_chunk_size is None and q.device.type == "cuda"
+            and q.dtype in {torch.bfloat16, torch.float16}
+            and q.shape[-1] % 8 == 0 and q.shape[-1] <= 256):
+        wheel = _flash_attn_wheel(q.device, q.dtype)
+        if wheel is not None:
+            return wheel(q[None], k[None], v[None], causal=causal)[0]
     block = query_chunk_size or (len(q) if q.device.type == "cuda" and backend != "math" else 256)
     query = q.transpose(0, 1).unsqueeze(0)
     key = k.transpose(0, 1).unsqueeze(0)
