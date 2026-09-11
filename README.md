@@ -22,6 +22,8 @@ examples/generate.py を修正しました。渡すjsonの`seed`を`-1`にする
 
 というような構成になっていたら"style"を"rock"の値で上書きして使用します。
 
+それから`--low-vram`引数を追加しています。これとは別にOOM対策をしていますが、それでも落ちる場合はお試しください。
+
 ---
 
 > Looking for the original YuE? Its code, documentation, and license are preserved on the **[YuE-v1 branch](https://github.com/multimodal-art-projection/YuE/tree/YuE-v1)**.
