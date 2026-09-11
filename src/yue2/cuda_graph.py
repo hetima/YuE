@@ -2,7 +2,8 @@
 
 The graph predicts branch logits only. The caller combines logits and samples
 once, then passes that same token to ``step``. Prefixes retain independent RoPE
-positions and cache slots. No vLLM, Triton, or custom extension is imported.
+positions and cache slots. No vLLM or Triton is imported; an optional flash-attn
+wheel is only touched when torch's own FlashAttention kernel is absent.
 """
 from __future__ import annotations
 from numbers import Integral
@@ -69,19 +70,34 @@ class GraphAR:
         self.max_tokens, self.branches = int(max_tokens), len(prefixes)
         self.capacity = max(map(len, prefixes)) + self.max_tokens
         self.capture, self.graph, self.output = capture, None, None
-        if attention_backend not in {"auto", "flash", "cudnn", "sdpa"}:
-            raise ValueError("attention_backend must be auto, flash, cudnn, or sdpa")
+        if attention_backend not in {"auto", "flash", "flash-attn", "cudnn", "sdpa"}:
+            raise ValueError("attention_backend must be auto, flash, flash-attn, cudnn, or sdpa")
         fused = self.device.type == "cuda" and self.dtype in {torch.bfloat16, torch.float16} and config.head_dim % 8 == 0
-        flash = fused and config.head_dim <= 256 and hasattr(torch.ops.aten, "_flash_attention_forward") and (
-            "seqused_k" in str(torch.ops.aten._flash_attention_forward.default._schema))
         # Torch 2.10 is pinned by the package. Its native variable-length FA
         # accepts GPU effective lengths; the public masked SDPA can select a
-        # much slower math kernel. Keep a cuDNN/public-SDPA fallback explicit.
+        # much slower math kernel. Windows wheels register the aten schema
+        # without compiling its kernel, and cuDNN can reject decode shapes,
+        # so every fused backend is probed with a live one-token call rather
+        # than schema inspection. The flash-attn wheel's with-kvcache entry
+        # point covers builds where torch's own kernel is missing.
+        self._flash_attn_with_kvcache = None
+        aten_flash = package_flash = cudnn = False
+        if fused:
+            if attention_backend in {"auto", "flash"} and config.head_dim <= 256:
+                aten_flash = self._probe_aten_flash(config, self.device, self.dtype)
+            if attention_backend in {"auto", "flash-attn"} and config.head_dim <= 256:
+                self._flash_attn_with_kvcache = self._probe_flash_attn(config, self.device, self.dtype)
+                package_flash = self._flash_attn_with_kvcache is not None
+            if attention_backend in {"auto", "cudnn"}:
+                cudnn = self._probe_cudnn(config, self.device, self.dtype)
         if attention_backend == "auto":
-            attention_backend = "flash" if flash else "cudnn" if fused and torch.backends.cudnn.is_available() else "sdpa"
-        if attention_backend == "flash" and not flash:
+            attention_backend = ("flash" if aten_flash else "flash-attn" if package_flash
+                                 else "cudnn" if cudnn else "sdpa")
+        if attention_backend == "flash" and not aten_flash:
             raise ValueError("Pinned PyTorch variable-length CUDA FlashAttention is unavailable")
-        if attention_backend == "cudnn" and not (fused and torch.backends.cudnn.is_available()):
+        if attention_backend == "flash-attn" and not package_flash:
+            raise ValueError("flash-attn wheel with a working with-kvcache kernel is unavailable")
+        if attention_backend == "cudnn" and not cudnn:
             raise ValueError("cuDNN attention requires a supported CUDA dtype/head dimension")
         self.attention_backend = attention_backend
         self.ready, self.closed, self.steps = False, False, 0
@@ -108,13 +124,64 @@ class GraphAR:
                                                torch.cat([layer.mlp.gate_proj.weight, layer.mlp.up_proj.weight], dim=0)))
         self.fused_weight_bytes = sum(value.numel() * value.element_size() for pair in self.fused_weights for value in pair)
 
+    @staticmethod
+    @torch.inference_mode()
+    def _probe_aten_flash(config, device, dtype):
+        if not hasattr(torch.ops.aten, "_flash_attention_forward"):
+            return False
+        if "seqused_k" not in str(torch.ops.aten._flash_attention_forward.default._schema):
+            return False
+        query = torch.zeros(1, 1, config.head_dim, device=device, dtype=dtype)
+        kv = torch.zeros(1, 1, config.head_dim, device=device, dtype=dtype)
+        bounds = torch.tensor([0, 1], dtype=torch.int32, device=device)
+        try:
+            torch.ops.aten._flash_attention_forward(query, kv, kv, bounds, bounds, 1, 1,
+                                                    0.0, False, False, seqused_k=bounds[1:])
+            return True
+        except RuntimeError:
+            return False
+
+    @staticmethod
+    @torch.inference_mode()
+    def _probe_flash_attn(config, device, dtype):
+        # Returns the wheel's entry point only after a live one-token call
+        # succeeds; a wheel built against different torch/CUDA/arch may
+        # import yet fail at kernel launch.
+        try:
+            from flash_attn import flash_attn_with_kvcache
+            query = torch.zeros(1, 1, 1, config.head_dim, device=device, dtype=dtype)
+            kv = torch.zeros(1, 1, 1, config.head_dim, device=device, dtype=dtype)
+            length = torch.ones(1, dtype=torch.int32, device=device)
+            flash_attn_with_kvcache(query, kv, kv, cache_seqlens=length)
+            return flash_attn_with_kvcache
+        except Exception:
+            return None
+
+    @staticmethod
+    @torch.inference_mode()
+    def _probe_cudnn(config, device, dtype):
+        if not torch.backends.cudnn.is_available():
+            return False
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+        grouped = config.num_attention_heads != config.num_key_value_heads
+        query = torch.zeros(1, 1, config.num_attention_heads, config.head_dim, device=device, dtype=dtype)
+        kv = torch.zeros(1, 2, config.num_key_value_heads, config.head_dim, device=device, dtype=dtype)
+        mask = torch.ones(1, 1, 1, 2, dtype=torch.bool, device=device)
+        try:
+            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                F.scaled_dot_product_attention(query.transpose(1, 2), kv.transpose(1, 2), kv.transpose(1, 2),
+                                               attn_mask=mask, is_causal=False, enable_gqa=grouped)
+            return True
+        except Exception:
+            return False
+
     @torch.inference_mode()
     def _decode(self):
         backbone = self.model.model
         cos, sin = backbone.rotary_emb(self.positions[:, None])
         x = backbone.embed_tokens(self.tokens)
         visible = None
-        if self.attention_backend != "flash":
+        if self.attention_backend not in {"flash", "flash-attn"}:
             visible = (self.key_positions[None, :] <= self.positions[:, None])[:, None, None, :]
         used_lengths = (self.positions + 1).to(torch.int32)
         config = self.model.config
@@ -147,6 +214,12 @@ class GraphAR:
                     values.view(-1, config.num_key_value_heads, config.head_dim),
                     self.cu_q, self.cu_k, 1, self.capacity, 0.0, False, False,
                     seqused_k=used_lengths)[0][:, None]
+            elif self.attention_backend == "flash-attn":
+                # with_kvcache reads the same capacity-strided cache; its
+                # cache_seqlens carries each branch's GPU effective length,
+                # so unfilled slots stay invisible. It handles GQA natively
+                # and is CUDA-graph capture safe (vLLM decodes in graphs).
+                h = self._flash_attn_with_kvcache(q, keys, values, cache_seqlens=used_lengths)
             elif self.attention_backend == "cudnn":
                 from torch.nn.attention import SDPBackend, sdpa_kernel
                 with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
@@ -232,6 +305,7 @@ class GraphAR:
 
     def close(self):
         self.graph = self.output = None
+        self._flash_attn_with_kvcache = None
         self.keys.clear()
         self.values.clear()
         self.fused_weights.clear()

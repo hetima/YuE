@@ -128,10 +128,52 @@ def test_real_cuda_graph_bfloat16_parity(model, prefixes, backend, fused):
             max_position_embeddings=64, max_latent_frames=64)).eval().to(device="cuda", dtype=torch.bfloat16)
     with torch.inference_mode():
         original, expected = reference_prefill(model, prefixes, 5)
-        graph = GraphAR(model, prefixes, 5, attention_backend=backend, fuse_projections=fused)
+        try:
+            graph = GraphAR(model, prefixes, 5, attention_backend=backend, fuse_projections=fused)
+        except ValueError as error:
+            # An explicitly requested fused backend is allowed to be absent
+            # on this machine's torch build; GraphAR must say so, not crash.
+            if backend != "auto" and ("unavailable" in str(error) or "requires" in str(error)):
+                pytest.skip(f"{backend} attention unavailable here: {error}")
+            raise
         torch.testing.assert_close(graph.prefill(), expected, atol=0, rtol=0)
         assert graph.graph is not None
-        assert graph.attention_backend == ("flash" if backend == "auto" else "cudnn")
+        if backend == "auto":
+            assert graph.attention_backend in {"flash", "flash-attn", "cudnn", "sdpa"}
+        else:
+            assert graph.attention_backend == backend
+        for keys, values in zip(graph.keys, graph.values):
+            for branch, prefix in enumerate(prefixes):
+                keys[branch, len(prefix)+1:].fill_(1000)
+                values[branch, len(prefix)+1:].fill_(-1000)
+        for token in [7, 8, 9, 10]:
+            expected = torch.cat([model(torch.tensor([[token]], device="cuda"), past_key_values=cache,
+                                       use_cache=True, logits_to_keep=1).logits[:, -1] for cache in original])
+            actual = graph.step(token).clone()
+            torch.testing.assert_close(actual, expected, atol=.002, rtol=.02)
+        graph.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA capture requires an actual allocated GPU")
+@pytest.mark.parametrize("prefixes", [[[2, 3, 4]], [[2, 3, 4, 5], [6]]])
+@pytest.mark.parametrize("fused", [False, True])
+def test_real_cuda_graph_flash_attn_package_bfloat16_parity(prefixes, fused):
+    # The optional flash-attn wheel replaces torch's missing native kernel on
+    # Windows builds; head_dim 64 matches head sizes its kernels ship for.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(146)
+        model = YuE2ForCausalLM(YuE2Config(hidden_size=256, intermediate_size=512, num_hidden_layers=2,
+            num_attention_heads=4, num_key_value_heads=2, head_dim=64, vocab_size=32,
+            max_position_embeddings=64, max_latent_frames=64)).eval().to(device="cuda", dtype=torch.bfloat16)
+    with torch.inference_mode():
+        try:
+            graph = GraphAR(model, prefixes, 5, attention_backend="flash-attn", fuse_projections=fused)
+        except ValueError as error:
+            pytest.skip(f"flash-attn wheel unavailable: {error}")
+        assert graph.attention_backend == "flash-attn"
+        original, expected = reference_prefill(model, prefixes, 5)
+        torch.testing.assert_close(graph.prefill(), expected, atol=0, rtol=0)
+        assert graph.graph is not None
         for keys, values in zip(graph.keys, graph.values):
             for branch, prefix in enumerate(prefixes):
                 keys[branch, len(prefix)+1:].fill_(1000)
