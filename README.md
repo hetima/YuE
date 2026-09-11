@@ -1,3 +1,17 @@
+# About this fork
+
+うちのWindowsで動かなかったので動くようにしました。ある程度長い曲もOOMせずに作れます。flash_attnが追加で必要です。torchに合ったものをインストールしてください。
+
+```
+uv pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu130
+uv pip install path/to/flash_attn-2.8.3+cu130torch2.12-cp312-cp312-win_amd64.whl
+uv pip install -e .
+```
+
+カバー用のスクリプトを `examples/cover.py` に置いています。
+
+---
+
 > Looking for the original YuE? Its code, documentation, and license are preserved on the **[YuE-v1 branch](https://github.com/multimodal-art-projection/YuE/tree/YuE-v1)**.
 
 <p align="center">
