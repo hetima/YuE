@@ -8,6 +8,20 @@ uv pip install path/to/flash_attn-2.8.3+cu130torch2.12-cp312-cp312-win_amd64.whl
 uv pip install -e .
 ```
 
+examples/generate.py を修正しました。渡すjsonの`seed`を`-1`にするとランダムになります。また、`style_key`というプロパティを追加し、例えば
+
+```
+{
+    "style": "...",
+    "style_key": "rock",
+    "rock": "...",
+    "other_style_template": "...",
+    ...
+}
+```
+
+というような構成になっていたら"style"を"rock"の値で上書きして使用します。
+
 ---
 
 > Looking for the original YuE? Its code, documentation, and license are preserved on the **[YuE-v1 branch](https://github.com/multimodal-art-projection/YuE/tree/YuE-v1)**.
