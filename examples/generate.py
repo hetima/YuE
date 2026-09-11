@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 
@@ -25,6 +26,9 @@ def main():
     # Only SongRequest fields are forwarded; unknown JSON fields are ignored.
     fields = {key: request[key] for key in
               ("style", "lyrics", "cot", "seed", "abc", "cfg_scale", "id") if key in request}
+    if fields.get("seed") == -1:
+        # -1 requests a random seed from SongRequest's [0, 2**63) domain.
+        fields["seed"] = random.randrange(2**63)
     if args.abc_file:
         fields["abc"] = args.abc_file.read_text(encoding="utf-8")
     if args.cot:
@@ -39,7 +43,8 @@ def main():
     ) as pipe:
         song = pipe(**fields)
         song.save_artifacts(args.output)
-        print(json.dumps({"audio": str(args.output / "audio.flac"), "truncated": song.truncated}))
+        print(json.dumps({"audio": str(args.output / "audio.flac"), "seed": song.semantic.plan.request.seed,
+                          "truncated": song.truncated}))
         return 1 if any(song.truncated.values()) else 0
 
 
