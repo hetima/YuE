@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--vae-revision")
     parser.add_argument("--low-vram", action="store_true",
                         help="Keep only the active generation path on the GPU")
+    parser.add_argument("--save-abc", action="store_true")
     args = parser.parse_args()
     # if args.output.exists():
     #     parser.error("Choose a fresh output directory to retain each version.")
@@ -80,6 +81,8 @@ def main():
         audio_path = next_audio_path(args.output, base)
         song.save(audio_path)
         # song.save_artifacts(args.output)
+        if args.save_abc and song.semantic.plan.abc is not None:
+           (audio_path.with_suffix(".abc")).write_bytes(song.semantic.plan.abc.encode("utf-8"))
         print(json.dumps({"audio": str(audio_path), "seed": song.semantic.plan.request.seed,
                           "truncated": song.truncated}))
         return 1 if any(song.truncated.values()) else 0
