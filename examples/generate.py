@@ -8,13 +8,25 @@ Request JSON handling on top of the upstream SongRequest fields:
 - style_key: when its value is a nonblank string naming another key in the
   same JSON, that key's value replaces style (style presets in one file);
   a missing key, blank value, or absent style_key keeps style as-is.
+- id: also names the output flac; a missing or blank id keeps the "audio" base.
 Unknown JSON fields are ignored rather than rejected.
 """
 
 import argparse
 import json
 import random
+import re
 from pathlib import Path
+
+
+def next_audio_path(out_dir, base):
+    # <base>.flac first, then <base>_<max existing suffix + 1>.flac.
+    # if not (out_dir / f"{base}.flac").exists():
+    #     return out_dir / f"{base}.flac"
+    numbered = re.compile(rf"{re.escape(base)}_(\d+)\.flac")
+    numbers = [int(m.group(1)) for p in out_dir.iterdir()
+               if (m := numbered.fullmatch(p.name))]
+    return out_dir / f"{base}_{max(numbers, default=0) + 1}.flac"
 
 
 def main():
@@ -30,8 +42,8 @@ def main():
     parser.add_argument("--low-vram", action="store_true",
                         help="Keep only the active generation path on the GPU")
     args = parser.parse_args()
-    if args.output.exists():
-        parser.error("Choose a fresh output directory to retain each version.")
+    # if args.output.exists():
+    #     parser.error("Choose a fresh output directory to retain each version.")
     request = json.loads(args.request.read_text(encoding="utf-8"))
     style_key = request.get("style_key")
     if isinstance(style_key, str) and style_key.strip() and style_key in request:
@@ -56,8 +68,14 @@ def main():
         vae_revision=args.vae_revision, device="cuda", low_vram=args.low_vram,
     ) as pipe:
         song = pipe(**fields)
-        song.save_artifacts(args.output)
-        print(json.dumps({"audio": str(args.output / "audio.flac"), "seed": song.semantic.plan.request.seed,
+        args.output.mkdir(parents=True, exist_ok=True)
+        # The flac basename follows the request id; missing or blank id means "audio".
+        base = str(fields.get("id") or "").strip() or "audio"
+        base = re.sub(r'[\\/:*?"<>|]', "_", base)  # keep it a legal Windows filename
+        audio_path = next_audio_path(args.output, base)
+        song.save(audio_path)
+        # song.save_artifacts(args.output)
+        print(json.dumps({"audio": str(audio_path), "seed": song.semantic.plan.request.seed,
                           "truncated": song.truncated}))
         return 1 if any(song.truncated.values()) else 0
 
