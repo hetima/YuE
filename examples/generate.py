@@ -33,6 +33,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--request", type=Path, default=Path(__file__).with_name("song.json"))
     parser.add_argument("--abc-file", type=Path)
+    parser.add_argument("--lyrics", type=Path,
+                        help="Read lyrics from a UTF-8 text file, overriding the request JSON")
     parser.add_argument("--cot", choices=("full", "melody", "off"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", default="m-a-p/YuE2-3B")
@@ -55,6 +57,9 @@ def main():
     if fields.get("seed") == -1:
         # -1 requests a random seed from SongRequest's [0, 2**63) domain.
         fields["seed"] = random.randrange(2**63)
+    if args.lyrics and args.lyrics.is_file():
+        # A UTF-8 lyrics file overrides the request lyrics; CRLF is normalized to LF.
+        fields["lyrics"] = args.lyrics.read_text(encoding="utf-8").replace("\r\n", "\n")
     if args.abc_file:
         fields["abc"] = args.abc_file.read_text(encoding="utf-8")
     if args.cot:
