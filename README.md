@@ -8,7 +8,7 @@ uv pip install path/to/flash_attn-2.8.3+cu130torch2.12-cp312-cp312-win_amd64.whl
 uv pip install -e .
 ```
 
-examples/generate.py を修正しました。渡すjsonの`seed`を`-1`にするとランダムになります。また、`style_key`というプロパティを追加し、例えば
+`examples/generate.py`を修正しました。渡すjsonの`seed`を`-1`にするとランダムになります。また、`style_key`というプロパティを追加し、例えば
 
 ```
 {
@@ -23,6 +23,12 @@ examples/generate.py を修正しました。渡すjsonの`seed`を`-1`にする
 というような構成になっていたら"style"を"rock"の値で上書きして使用します。
 
 それから`--low-vram`引数を追加しています。これとは別にOOM対策をしていますが、それでも落ちる場合はお試しください。
+
+ai-toolkitで作成したLoRAの読み込みに対応しました。`examples/generate.py`に引数で指定できます。
+
+```
+python examples/generate.py --lora path/to/lora.safetensors --lora-strength 1.0
+```
 
 ---
 
