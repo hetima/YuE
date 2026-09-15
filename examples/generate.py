@@ -10,6 +10,9 @@ Request JSON handling on top of the upstream SongRequest fields:
   a missing key, blank value, or absent style_key keeps style as-is.
 - id: also names the output flac; a missing or blank id keeps the "audio" base.
 Unknown JSON fields are ignored rather than rejected.
+
+--lora PATH [--lora-strength S] merges ai-toolkit YuE2 LoRA files into the
+model weights before generation; repeatable for stacking.
 """
 
 import argparse
@@ -44,6 +47,10 @@ def main():
     parser.add_argument("--low-vram", action="store_true",
                         help="Keep only the active generation path on the GPU")
     parser.add_argument("--save-abc", action="store_true")
+    parser.add_argument("--lora", action="append", default=[], metavar="PATH",
+                        help="Merge an ai-toolkit YuE2 LoRA file; repeatable")
+    parser.add_argument("--lora-strength", type=float, default=1.0,
+                        help="Multiplier applied to every --lora delta")
     args = parser.parse_args()
     # if args.output.exists():
     #     parser.error("Choose a fresh output directory to retain each version.")
@@ -73,6 +80,12 @@ def main():
         args.model, vae=args.vae, revision=args.revision,
         vae_revision=args.vae_revision, device="cuda", low_vram=args.low_vram,
     ) as pipe:
+        if args.lora:
+            from yue2.lora import merge_lora
+            pipe._load_model()  # the LLM loads lazily; materialize it before merging
+            for path in args.lora:
+                counts = merge_lora(pipe._model, path, args.lora_strength)
+                print(json.dumps({"lora": str(path), "modules": counts}))
         song = pipe(**fields)
         args.output.mkdir(parents=True, exist_ok=True)
         # The flac basename follows the request id; missing or blank id means "audio".
