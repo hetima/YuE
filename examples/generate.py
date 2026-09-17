@@ -13,6 +13,8 @@ Unknown JSON fields are ignored rather than rejected.
 
 --lora PATH [--lora-strength S] merges ai-toolkit YuE2 LoRA files into the
 model weights before generation; repeatable for stacking.
+--nar-lora PATH merges a Mothersuperior nar_lora_joint adapter (LoRA pairs on
+the NAR branch + full vae2llm/llm2vae replacement) before the --lora merges.
 """
 
 import argparse
@@ -51,6 +53,8 @@ def main():
                         help="Merge an ai-toolkit YuE2 LoRA file; repeatable")
     parser.add_argument("--lora-strength", type=float, default=1.0,
                         help="Multiplier applied to every --lora delta")
+    parser.add_argument("--nar-lora", type=Path, metavar="PATH",
+                        help="Merge a Mothersuperior nar_lora_joint adapter into the NAR branch")
     args = parser.parse_args()
     # if args.output.exists():
     #     parser.error("Choose a fresh output directory to retain each version.")
@@ -80,9 +84,14 @@ def main():
         args.model, vae=args.vae, revision=args.revision,
         vae_revision=args.vae_revision, device="cuda", low_vram=args.low_vram,
     ) as pipe:
-        if args.lora:
-            from yue2.lora import merge_lora
+        if args.lora or args.nar_lora:
+            from yue2.lora import merge_lora, merge_nar_adapter
             pipe._load_model()  # the LLM loads lazily; materialize it before merging
+        if args.nar_lora:
+            # the adapter is part of the training base, so fold it before any --lora
+            summary = merge_nar_adapter(pipe._model, args.nar_lora)
+            print(json.dumps({"nar_lora": str(args.nar_lora), "modules": summary}))
+        if args.lora:
             for path in args.lora:
                 counts = merge_lora(pipe._model, path, args.lora_strength)
                 print(json.dumps({"lora": str(path), "modules": counts}))

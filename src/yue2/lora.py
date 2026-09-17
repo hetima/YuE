@@ -21,6 +21,11 @@ _KEY = re.compile(
     r"(?P<module>self_attn\.qkv_proj|self_attn\.o_proj|mlp\.gate_up_proj|mlp\.down_proj)\."
     r"lora_(?P<side>[AB])\.weight$")
 
+_NAR_KEY = re.compile(
+    r"^layers\.(?P<layer>\d+)\.(?P<mod>nar_self_attn|nar_mlp)\."
+    r"(?P<proj>q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)\."
+    r"lora_(?P<side>[AB])$")
+
 
 @torch.no_grad()
 def merge_lora(model, path, strength=1.0):
@@ -79,3 +84,61 @@ def merge_lora(model, path, strength=1.0):
             weight.add_(rows.to(weight.device, weight.dtype))
         counts[branch] += 1
     return counts
+
+
+@torch.no_grad()
+def merge_nar_adapter(model, path, strength=1.0):
+    """Fold a Mothersuperior joint NAR adapter (nar_lora_joint_*.safetensors)
+    into a loaded official YuE2ForCausalLM.
+
+    The file carries LoRA pairs under ``layers.N.nar_self_attn/nar_mlp.<proj>
+    .lora_A/B`` — the official model's separate projections, so no row
+    splitting — plus complete replacement weights for the top-level
+    ``vae2llm``/``llm2vae`` Linears. Returns a ``{"nar_projections": n,
+    "io": [...]}`` summary. Raises ValueError on keys outside the expected
+    layout, missing sides, or shapes that disagree with the target weights.
+    """
+    if model.training:
+        raise ValueError("merge_nar_adapter requires model.eval()")
+    if not isinstance(strength, (float, int)):
+        raise TypeError("strength must be a number")
+    tensors = load_file(path)
+    pairs, io_source = {}, {}
+    for key, value in tensors.items():
+        match = _NAR_KEY.match(key)
+        if match is not None:
+            pairs.setdefault((int(match["layer"]), match["mod"], match["proj"]), {})[match["side"]] = value
+        elif key in ("vae2llm.weight", "vae2llm.bias", "llm2vae.weight", "llm2vae.bias"):
+            io_source[key] = value
+        else:
+            raise ValueError(f"Unexpected adapter key {key!r}; this merger handles the "
+                             "Mothersuperior nar_lora_joint layout only")
+    merged = 0
+    for (layer_index, mod, proj), sides in sorted(pairs.items()):
+        if set(sides) != {"A", "B"}:
+            raise ValueError(f"Adapter layer {layer_index} {mod}.{proj} misses a side")
+        if not 0 <= layer_index < len(model.model.layers):
+            raise ValueError(f"Adapter layer {layer_index} is outside the model")
+        weight = getattr(getattr(model.model.layers[layer_index], mod), proj).weight
+        delta = (sides["B"].float() @ sides["A"].float()) * strength
+        if tuple(delta.shape) != tuple(weight.shape):
+            raise ValueError(f"Layer {layer_index} {mod}.{proj}: delta {tuple(delta.shape)} "
+                             f"vs weight {tuple(weight.shape)}")
+        weight.add_(delta.to(weight.device, weight.dtype))
+        merged += 1
+    io = []
+    for name in ("vae2llm", "llm2vae"):
+        module = getattr(model, name)
+        for pname in ("weight", "bias"):
+            key = f"{name}.{pname}"
+            if key in io_source:
+                target = getattr(module, pname)
+                if tuple(io_source[key].shape) != tuple(target.shape):
+                    raise ValueError(f"{key}: file {tuple(io_source[key].shape)} "
+                                     f"vs model {tuple(target.shape)}")
+                target.copy_(io_source[key].to(target.device, target.dtype))
+                if pname == "weight":
+                    io.append(name)
+            elif pname == "weight":
+                raise ValueError(f"Adapter has no {key}; the joint layout replaces io weights outright")
+    return {"nar_projections": merged, "io": io}
