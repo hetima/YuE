@@ -11,6 +11,11 @@ Request JSON handling on top of the upstream SongRequest fields:
 - id: also names the output flac; a missing or blank id keeps the "audio" base.
 Unknown JSON fields are ignored rather than rejected.
 
+--num N generates N songs on one model load: songs run with seed, seed-1, ...
+(the start seed is lifted above N when seed < N so the countdown stays >= 0).
+A supplied ABC score is reused for every song; otherwise each song plans a
+fresh score. A failed song is reported and the batch continues.
+
 --lora PATH [--lora-strength S] merges ai-toolkit YuE2 LoRA files, Mothersuperior
 NAR adapters, or bundles of both (tools/bundle.py) into the model weights before
 generation; repeatable for stacking. A file may carry at most one adapter
@@ -51,6 +56,8 @@ def main():
     parser.add_argument("--low-vram", action="store_true",
                         help="Keep only the active generation path on the GPU")
     parser.add_argument("--save-abc", action="store_true")
+    parser.add_argument("--num", type=int, default=1, metavar="N",
+                        help="Generate N songs on one model load; seeds count down")
     parser.add_argument("--lora", action="append", default=[], metavar="PATH",
                         help="Merge an ai-toolkit LoRA, a NAR adapter, or a bundle; repeatable")
     parser.add_argument("--lora-strength", type=float, default=1.0,
@@ -80,6 +87,15 @@ def main():
         fields["cot"] = args.cot
     if fields.get("abc") is not None and fields.get("cot", "full") == "off":
         parser.error("A supplied score requires full or melody mode.")
+    if args.num < 1:
+        parser.error("--num must be at least 1")
+    # Songs run with seed, seed-1, ...; lift the start above num so the countdown
+    # never dips below zero (seed=3, num=5 -> 8,7,6,5,4). A missing seed starts
+    # from SongRequest's default.
+    start_seed = fields.setdefault("seed", 831001)
+    if args.num > start_seed:
+        start_seed += args.num
+    fields["seed"] = start_seed
     from yue2 import YuE2Pipeline
 
     with YuE2Pipeline.from_pretrained(
@@ -97,19 +113,31 @@ def main():
             for path in args.lora:
                 counts = merge_lora(pipe._model, path, args.lora_strength)
                 print(json.dumps({"lora": str(path), "modules": counts}))
-        song = pipe(**fields)
         args.output.mkdir(parents=True, exist_ok=True)
         # The flac basename follows the request id; missing or blank id means "audio".
         base = str(fields.get("id") or "").strip() or "audio"
         base = re.sub(r'[\\/:*?"<>|]', "_", base)  # keep it a legal Windows filename
-        audio_path = next_audio_path(args.output, base)
-        song.save(audio_path)
-        # song.save_artifacts(args.output)
-        if args.save_abc and song.semantic.plan.abc is not None:
-           (audio_path.with_suffix(".abc")).write_bytes(song.semantic.plan.abc.encode("utf-8"))
-        print(json.dumps({"audio": str(audio_path), "seed": song.semantic.plan.request.seed,
-                          "truncated": song.truncated}))
-        return 1 if any(song.truncated.values()) else 0
+        generated = failed = 0
+        truncated_any = False
+        for index in range(args.num):
+            # a supplied score is reused every song; otherwise pipe plans a fresh one
+            try:
+                song = pipe(**{**fields, "seed": start_seed - index})
+                audio_path = next_audio_path(args.output, base)
+                song.save(audio_path)
+                # song.save_artifacts(args.output)
+                if args.save_abc and song.semantic.plan.abc is not None:
+                    (audio_path.with_suffix(".abc")).write_bytes(song.semantic.plan.abc.encode("utf-8"))
+                truncated_any |= any(song.truncated.values())
+                generated += 1
+                print(json.dumps({"song": f"{index + 1}/{args.num}", "audio": str(audio_path),
+                                  "seed": song.semantic.plan.request.seed, "truncated": song.truncated}))
+            except Exception as exc:  # one bad take must not waste the batch
+                failed += 1
+                print(json.dumps({"song": f"{index + 1}/{args.num}", "seed": start_seed - index,
+                                  "error": f"{type(exc).__name__}: {exc}"}))
+        print(json.dumps({"generated": generated, "failed": failed, "output": str(args.output)}))
+        return 1 if failed or truncated_any else 0
 
 
 if __name__ == "__main__":
