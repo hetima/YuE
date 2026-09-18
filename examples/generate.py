@@ -11,8 +11,10 @@ Request JSON handling on top of the upstream SongRequest fields:
 - id: also names the output flac; a missing or blank id keeps the "audio" base.
 Unknown JSON fields are ignored rather than rejected.
 
---lora PATH [--lora-strength S] merges ai-toolkit YuE2 LoRA files into the
-model weights before generation; repeatable for stacking.
+--lora PATH [--lora-strength S] merges ai-toolkit YuE2 LoRA files, Mothersuperior
+NAR adapters, or bundles of both (tools/bundle.py) into the model weights before
+generation; repeatable for stacking. A file may carry at most one adapter
+source alongside the --nar-lora flag.
 --nar-lora PATH merges a Mothersuperior nar_lora_joint adapter (LoRA pairs on
 the NAR branch + full vae2llm/llm2vae replacement) before the --lora merges.
 """
@@ -50,7 +52,7 @@ def main():
                         help="Keep only the active generation path on the GPU")
     parser.add_argument("--save-abc", action="store_true")
     parser.add_argument("--lora", action="append", default=[], metavar="PATH",
-                        help="Merge an ai-toolkit YuE2 LoRA file; repeatable")
+                        help="Merge an ai-toolkit LoRA, a NAR adapter, or a bundle; repeatable")
     parser.add_argument("--lora-strength", type=float, default=1.0,
                         help="Multiplier applied to every --lora delta")
     parser.add_argument("--nar-lora", type=Path, metavar="PATH",

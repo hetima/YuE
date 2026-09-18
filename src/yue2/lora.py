@@ -8,6 +8,13 @@ alpha correction (linear_alpha equals rank), so the applied delta is
 ``B @ A * strength`` exactly as the trainer's own merge helper computes it.
 Merging keeps standard ``nn.Linear`` modules, so the CUDA-graph decode path
 stays valid.
+
+``merge_lora`` also accepts Mothersuperior NAR adapters (``nar_lora_joint_*
+.safetensors``: LoRA pairs on the NAR branch plus full ``vae2llm``/``llm2vae``
+replacement) and bundles that carry both payloads in one file
+(``tools/bundle.py``); the two key namespaces are disjoint, so files are
+identified by their keys alone. At most one adapter source may be folded per
+model — a second one raises instead of silently stacking decoder fixes.
 """
 from __future__ import annotations
 
@@ -26,20 +33,39 @@ _NAR_KEY = re.compile(
     r"(?P<proj>q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)\."
     r"lora_(?P<side>[AB])$")
 
+_IO_KEYS = ("vae2llm.weight", "vae2llm.bias", "llm2vae.weight", "llm2vae.bias")
+
 
 @torch.no_grad()
 def merge_lora(model, path, strength=1.0):
-    """Fold one ai-toolkit YuE2 LoRA file into a loaded YuE2ForCausalLM.
+    """Fold an ai-toolkit YuE2 LoRA file, a Mothersuperior NAR adapter, or a
+    bundle of both (see ``tools/bundle.py``) into a loaded YuE2ForCausalLM.
 
-    Returns a ``{branch: merged module count}`` summary. Raises ValueError on
-    keys that do not match the expected layout or shapes that disagree with
-    the target weights.
+    Returns a summary dict: ai-toolkit branch module counts
+    (``text_encoders``/``diffusion_model``), plus ``nar_projections``/``io``
+    when the file carried an adapter section. The adapter section always
+    folds at strength 1.0 — it is part of the training base, not a
+    stylization dial; ``strength`` keeps applying to the ai-toolkit pairs
+    only. Raises ValueError on keys outside the known layouts, on shapes
+    that disagree with the target weights, or on a second adapter source.
     """
     if model.training:
         raise ValueError("merge_lora requires model.eval()")
     if not isinstance(strength, float) and not isinstance(strength, int):
         raise TypeError("strength must be a number")
     tensors = load_file(path)
+    lora_keys = [key for key in tensors if _KEY.match(key)]
+    nar_keys = [key for key in tensors if _NAR_KEY.match(key) or key in _IO_KEYS]
+    unknown = [key for key in tensors if key not in set(lora_keys) | set(nar_keys)]
+    if unknown:
+        raise ValueError(f"Unexpected LoRA key {unknown[0]!r}; this merger handles the "
+                         "ai-toolkit YuE2 layout, the Mothersuperior nar_lora_joint "
+                         "layout, or a bundle of both")
+    counts = {"text_encoders": 0, "diffusion_model": 0}
+    if nar_keys:
+        _require_adapter_slot(model)
+        counts.update(_fold_nar_adapter(model, {key: tensors[key] for key in nar_keys}, 1.0))
+        model._nar_adapter_source = str(path)
     config = model.config
     inner = config.num_attention_heads * config.head_dim
     kv = config.num_key_value_heads * config.head_dim
@@ -49,14 +75,11 @@ def merge_lora(model, path, strength=1.0):
         "mlp.gate_up_proj": {"gate_proj": (0, config.intermediate_size),
                              "up_proj": (config.intermediate_size, 2 * config.intermediate_size)},
     }
-    pairs, counts = {}, {"text_encoders": 0, "diffusion_model": 0}
-    for key, value in tensors.items():
+    pairs = {}
+    for key in lora_keys:
         match = _KEY.match(key)
-        if match is None:
-            raise ValueError(f"Unexpected LoRA key {key!r}; this merger handles the "
-                             "ai-toolkit YuE2 layout only")
         ident = (match["branch"], int(match["layer"]), match["module"], match["side"])
-        pairs.setdefault(ident[:-1], {})[match["side"]] = value
+        pairs.setdefault(ident[:-1], {})[match["side"]] = tensors[key]
     for (branch, layer_index, module), sides in sorted(pairs.items()):
         if set(sides) != {"A", "B"}:
             raise ValueError(f"LoRA module {branch} layer {layer_index} {module} misses a side")
@@ -86,33 +109,23 @@ def merge_lora(model, path, strength=1.0):
     return counts
 
 
-@torch.no_grad()
-def merge_nar_adapter(model, path, strength=1.0):
-    """Fold a Mothersuperior joint NAR adapter (nar_lora_joint_*.safetensors)
-    into a loaded official YuE2ForCausalLM.
+def _require_adapter_slot(model):
+    source = getattr(model, "_nar_adapter_source", None)
+    if source is not None:
+        raise ValueError(f"a NAR adapter was already folded ({source}); drop the duplicate "
+                         "--nar-lora or bundled adapter section")
 
-    The file carries LoRA pairs under ``layers.N.nar_self_attn/nar_mlp.<proj>
-    .lora_A/B`` — the official model's separate projections, so no row
-    splitting — plus complete replacement weights for the top-level
-    ``vae2llm``/``llm2vae`` Linears. Returns a ``{"nar_projections": n,
-    "io": [...]}`` summary. Raises ValueError on keys outside the expected
-    layout, missing sides, or shapes that disagree with the target weights.
-    """
-    if model.training:
-        raise ValueError("merge_nar_adapter requires model.eval()")
-    if not isinstance(strength, (float, int)):
-        raise TypeError("strength must be a number")
-    tensors = load_file(path)
+
+def _fold_nar_adapter(model, tensors, strength):
+    """Fold adapter-namespace tensors (keys already validated by the caller)
+    into the model. Returns the {"nar_projections": n, "io": [...]} summary."""
     pairs, io_source = {}, {}
     for key, value in tensors.items():
         match = _NAR_KEY.match(key)
         if match is not None:
             pairs.setdefault((int(match["layer"]), match["mod"], match["proj"]), {})[match["side"]] = value
-        elif key in ("vae2llm.weight", "vae2llm.bias", "llm2vae.weight", "llm2vae.bias"):
-            io_source[key] = value
         else:
-            raise ValueError(f"Unexpected adapter key {key!r}; this merger handles the "
-                             "Mothersuperior nar_lora_joint layout only")
+            io_source[key] = value
     merged = 0
     for (layer_index, mod, proj), sides in sorted(pairs.items()):
         if set(sides) != {"A", "B"}:
@@ -142,3 +155,33 @@ def merge_nar_adapter(model, path, strength=1.0):
             elif pname == "weight":
                 raise ValueError(f"Adapter has no {key}; the joint layout replaces io weights outright")
     return {"nar_projections": merged, "io": io}
+
+
+@torch.no_grad()
+def merge_nar_adapter(model, path, strength=1.0):
+    """Fold a Mothersuperior joint NAR adapter (nar_lora_joint_*.safetensors)
+    into a loaded official YuE2ForCausalLM.
+
+    Adapter files only — ai-toolkit LoRA pairs, alone or bundled, go through
+    ``merge_lora``. The file carries LoRA pairs under ``layers.N.nar_self_attn
+    /nar_mlp.<proj>.lora_A/B`` — the official model's separate projections,
+    so no row splitting — plus complete replacement weights for the top-level
+    ``vae2llm``/``llm2vae`` Linears. Returns a ``{"nar_projections": n,
+    "io": [...]}`` summary. Raises ValueError on keys outside the expected
+    layout, missing sides, shapes that disagree with the target weights, or a
+    second adapter application.
+    """
+    if model.training:
+        raise ValueError("merge_nar_adapter requires model.eval()")
+    if not isinstance(strength, (float, int)):
+        raise TypeError("strength must be a number")
+    tensors = load_file(path)
+    foreign = [key for key in tensors if not (_NAR_KEY.match(key) or key in _IO_KEYS)]
+    if foreign:
+        raise ValueError(f"Unexpected adapter key {foreign[0]!r}; this merger handles the "
+                         "Mothersuperior nar_lora_joint layout only (ai-toolkit LoRA "
+                         "files and bundles go through merge_lora)")
+    _require_adapter_slot(model)
+    summary = _fold_nar_adapter(model, tensors, strength)
+    model._nar_adapter_source = str(path)
+    return summary
