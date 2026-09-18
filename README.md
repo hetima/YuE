@@ -8,7 +8,21 @@ uv pip install path/to/flash_attn-2.8.3+cu130torch2.12-cp312-cp312-win_amd64.whl
 uv pip install -e .
 ```
 
-`examples/generate.py`を修正しました。渡すjsonの`seed`を`-1`にするとランダムになります。また、`style_key`というプロパティを追加し、例えば
+## generate.py
+`examples/generate.py`を修正しました。使い方は
+
+```
+python examples/generate.py 
+  --output "path/to/outputs"
+  --request "path/to/.json"
+  --abc-file "path/to/.abc"
+  --lyrics "path/to/lyrics.txt"
+  --nar-lora "path/to/nar_lora_joint_v9.safetensors"
+  --lora "path/to/lora.safetensors"
+  --lora-strength 0.6
+```
+
+渡すjsonの`seed`を`-1`にするとランダムになります。また、`style_key`というプロパティを追加し、例えば
 
 ```
 {
@@ -24,11 +38,35 @@ uv pip install -e .
 
 それから`--low-vram`引数を追加しています。これとは別にOOM対策をしていますが、それでも落ちる場合はお試しください。
 
+## LoRA
 ai-toolkitで作成したLoRAの読み込みに対応しました。`examples/generate.py`に引数で指定できます。
 
 ```
 python examples/generate.py --lora path/to/lora.safetensors --lora-strength 1.0
 ```
+
+ai-toolkitのconfig.yamlに`merge_nar_lora: true`という値を追加すると、`nar_lora_joint`を使用してトレーニングします。`model`→`model_kwargs`に書きます。
+
+```
+model:
+    name_or_path: "path/to/yue2_3b_bf16.safetensors"
+    quantize: false
+    quantize_te: false
+    arch: "yue2"
+    low_vram: true
+    model_kwargs:
+        merge_nar_lora: true
+        cot: "full"
+```
+
+この設定で作成したLoRAは、推論時にも`nar_lora_joint`を使います（不使用でも生成できますが若干音が変わります）。`--nar-lora` 引数で渡してください。
+
+```
+python examples/generate.py --nar-lora "path/to/nar_lora_joint_v9.safetensors"
+```
+
+2026-09-18現在のai-toolkitは`nar_lora_joint_v4.pt`を使用しています。generate.pyは.ptには対応していないので、[Hugging Face](https://huggingface.co/Mothersuperior/yue2-mothersuperior-realaudio-tokenizer-v4)から`nar_lora_joint_v4.safetensors`をダウンロードしてきてください。
+
 
 ---
 
