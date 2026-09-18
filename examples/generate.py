@@ -11,6 +11,11 @@ Request JSON handling on top of the upstream SongRequest fields:
 - id: also names the output flac; a missing or blank id keeps the "audio" base.
 Unknown JSON fields are ignored rather than rejected.
 
+Request JSON can also stand in for CLI flags that were not passed; the command
+line always wins and blank values count as unset: output, abc_file,
+lyrics_file (a file fallback for the lyrics key), nar_lora, lora (a path or a
+list of paths), lora_strength.
+
 --num N generates N songs on one model load: songs run with seed, seed-1, ...
 (the start seed is lifted above N when seed < N so the countdown stays >= 0).
 A supplied ABC score is reused for every song; otherwise each song plans a
@@ -31,6 +36,11 @@ import re
 from pathlib import Path
 
 
+def _blank(value):
+    """None or a whitespace-only string counts as unset (request JSON values)."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def next_audio_path(out_dir, base):
     # <base>.flac first, then <base>_<max existing suffix + 1>.flac.
     # if not (out_dir / f"{base}.flac").exists():
@@ -48,7 +58,8 @@ def main():
     parser.add_argument("--lyrics", type=Path,
                         help="Read lyrics from a UTF-8 text file, overriding the request JSON")
     parser.add_argument("--cot", choices=("full", "melody", "off"))
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=None,
+                        help="Output directory (fallback: request JSON 'output')")
     parser.add_argument("--model", default="m-a-p/YuE2-3B")
     parser.add_argument("--vae", default="m-a-p/YuE2-Vae")
     parser.add_argument("--revision")
@@ -60,8 +71,8 @@ def main():
                         help="Generate N songs on one model load; seeds count down")
     parser.add_argument("--lora", action="append", default=[], metavar="PATH",
                         help="Merge an ai-toolkit LoRA, a NAR adapter, or a bundle; repeatable")
-    parser.add_argument("--lora-strength", type=float, default=1.0,
-                        help="Multiplier applied to every --lora delta")
+    parser.add_argument("--lora-strength", type=float, default=None,
+                        help="Multiplier applied to every --lora delta (default: 1.0 or request JSON 'lora_strength')")
     parser.add_argument("--nar-lora", type=Path, metavar="PATH",
                         help="Merge a Mothersuperior nar_lora_joint adapter into the NAR branch")
     args = parser.parse_args()
@@ -72,6 +83,36 @@ def main():
     if isinstance(style_key, str) and style_key.strip() and style_key in request:
         # A nonblank style_key selects a style preset from the same request.
         request["style"] = request[style_key]
+    # CLI flags win; request JSON stands in for anything left unset (blank = unset).
+    args.output = args.output if args.output is not None else (
+        None if _blank(request.get("output")) else Path(request["output"]))
+    if args.output is None:
+        parser.error("--output is required: pass --output or set 'output' in the request JSON")
+    for name, key in (("--abc-file", "abc_file"), ("--nar-lora", "nar_lora")):
+        value = getattr(args, name.lstrip("-").replace("-", "_"))
+        if value is None and not _blank(request.get(key)):
+            setattr(args, name.lstrip("-").replace("-", "_"), Path(request[key]))
+    # lyrics_file only stands in when the request carries no inline lyrics
+    if args.lyrics is None and _blank(request.get("lyrics")) and not _blank(request.get("lyrics_file")):
+        args.lyrics = Path(request["lyrics_file"])
+    if not args.lora:
+        entries = request.get("lora")
+        if isinstance(entries, str):
+            entries = [entries]
+        if isinstance(entries, list):
+            try:
+                args.lora = [Path(e) for e in entries if not _blank(e)]
+            except TypeError:
+                parser.error("request JSON 'lora' must be a path or a list of paths")
+    if args.lora_strength is None:
+        strength = request.get("lora_strength")
+        if _blank(strength):
+            args.lora_strength = 1.0
+        else:
+            try:
+                args.lora_strength = float(strength)
+            except (TypeError, ValueError):
+                parser.error("request JSON 'lora_strength' must be a number")
     # Only SongRequest fields are forwarded; unknown JSON fields are ignored.
     fields = {key: request[key] for key in
               ("style", "lyrics", "cot", "seed", "abc", "cfg_scale", "id") if key in request}
