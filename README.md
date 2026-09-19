@@ -11,7 +11,7 @@ uv pip install -e .
 ## generate.py
 `examples/generate.py`を修正しました。使い方は
 
-```
+```sh
 python examples/generate.py 
   --output "path/to/outputs"
   --request "path/to/.json"
@@ -20,11 +20,35 @@ python examples/generate.py
   --nar-lora "path/to/nar_lora_joint_v9.safetensors"
   --lora "path/to/lora.safetensors"
   --lora-strength 0.6
+  --num 1
 ```
+
+`--low-vram`引数もあります。これとは別にOOM対策をしていますが、それでも落ちる場合はお試しください。
+
+## request.json
+
+ほとんどの引数はjsonに記述することもでき、コマンドを簡素化できます。
+
+```json
+{
+  "id": "cover",
+  "output": "path/to/outputs",
+  "nar_lora": "path/to/nar_lora_joint_v9.safetensors",
+  "lora": "path/to/lora.safetensors",
+  "lora_strength": 0.6,
+  "lyrics_file": "path/to/lyrics.txt",
+  "abc_file": "path/to/score.abc",
+  "cot": "melody",
+  "seed": -1,
+  "style": "..."
+}
+```
+
+コマンドライン引数の方が優先されます。`id`は書き出すファイル名として使用されます。
 
 渡すjsonの`seed`を`-1`にするとランダムになります。また、`style_key`というプロパティを追加し、例えば
 
-```
+```json
 {
     "style": "...",
     "style_key": "rock",
@@ -36,7 +60,7 @@ python examples/generate.py
 
 というような構成になっていたら"style"を"rock"の値で上書きして使用します。
 
-それから`--low-vram`引数を追加しています。これとは別にOOM対策をしていますが、それでも落ちる場合はお試しください。
+
 
 ## LoRA
 ai-toolkitで作成したLoRAの読み込みに対応しました。`examples/generate.py`に引数で指定できます。
@@ -47,7 +71,7 @@ python examples/generate.py --lora path/to/lora.safetensors --lora-strength 1.0
 
 ai-toolkitのconfig.yamlに`merge_nar_lora: true`という値を追加すると、`nar_lora_joint`を使用してトレーニングします。`model`→`model_kwargs`に書きます。
 
-```
+```yaml
 model:
     name_or_path: "path/to/yue2_3b_bf16.safetensors"
     quantize: false
