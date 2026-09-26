@@ -89,8 +89,6 @@ model:
 python examples/generate.py --nar-lora "path/to/nar_lora_joint_v9.safetensors"
 ```
 
-2026-09-18現在のai-toolkitは`nar_lora_joint_v4.pt`を使用しています。generate.pyは.ptには対応していないので、[Hugging Face](https://huggingface.co/Mothersuperior/yue2-mothersuperior-realaudio-tokenizer-v4)から`nar_lora_joint_v4.safetensors`をダウンロードしてきてください。
-
 
 ---
 
